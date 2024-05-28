@@ -524,9 +524,9 @@ Import-Module -Name Microsoft.WinGet.CommandNotFound > $null 2>&1
 if (-not $?) { Write-Host "💭 Make sure to install WingetCommandNotFound by MS Powertoys" -ForegroundColor Yellow }
 if (-not (Test-Path -Path $PROFILE)) {
     New-Item -ItemType File -Path $PROFILE | Out-Null
-    Add-Content -Path $PROFILE -Value 'iex (iwr "https://github.com/IndianaHein/Config/main/Microsoft.PowerShell_profile.ps1").Content'
+    Add-Content -Path $PROFILE -Value 'iex (iwr "https://raw.githubusercontent.com/IndianaHein/Config/main/Microsoft.PowerShell_profile.ps1").Content'
     Write-Host "PowerShell profile created at $PROFILE." -ForegroundColor Yellow
 }
 # Check and install FiraCode font
 Search-InstallFiraCodeFont
-oh-my-posh init pwsh --config 'https://github.com/IndianaHein/Config/main/montys.omp.json' | Invoke-Expression
+oh-my-posh init pwsh --config 'https://raw.githubusercontent.com/IndianaHein/Config/main/montys.omp.json' | Invoke-Expression
