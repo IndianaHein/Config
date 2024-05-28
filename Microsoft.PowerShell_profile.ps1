@@ -7,7 +7,7 @@ Write-Host ""
 
 # Initial GitHub.com connectivity check with 1 second timeout
 $canConnectToGitHub = Test-Connection github.com -Count 1 -Quiet 
-$configPath = "C:\Project\pwsh_custom_config.yml"
+$configPath = "C:\Users\HeinHammervold\OneDrive - SkyeTec\Documents\WindowsPowerShell\pwsh_custom_config.yml"
 
 function Initialize-DevEnv {
     if (-not $global:canConnectToGitHub) {
