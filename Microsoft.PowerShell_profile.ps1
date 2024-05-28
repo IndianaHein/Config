@@ -6,7 +6,7 @@ Write-Host ""
 #All Colors: Black, Blue, Cyan, DarkBlue, DarkCyan, DarkGray, DarkGreen, DarkMagenta, DarkRed, DarkYellow, Gray, Green, Magenta, Red, White, Yellow.
 
 # Initial GitHub.com connectivity check with 1 second timeout
-$canConnectToGitHub = Test-Connection github.com -Count 1 -Quiet -timeoutseconds 1
+$canConnectToGitHub = Test-Connection github.com -Count 1 -Quiet 
 $configPath = "C:\Project\pwsh_custom_config.yml"
 
 function Initialize-DevEnv {
