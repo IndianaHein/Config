@@ -197,18 +197,23 @@ function Get-InstalledFont {
 
     try {
         $fontsKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-        if (Test-Path $fontsKey) {
-            Get-ItemProperty $fontsKey |
-            Select-Object -ExpandProperty PSObject |
-            Select-Object -ExpandProperty Properties |
-            Where-Object { $_.Name -like $NamePattern } |
-            ForEach-Object Name
-        }
+        if (-not (Test-Path $fontsKey)) { return @() }
+
+        $item = Get-ItemProperty -Path $fontsKey
+
+        # Enumerate value names under the key (these are the font display names)
+        $item.PSObject.Properties |
+        Where-Object {
+            $_.MemberType -eq 'NoteProperty' -and
+            $_.Name -like $NamePattern
+        } |
+        ForEach-Object { $_.Name }
     }
     catch {
         @()
     }
 }
+
 
 
 function Install-FiraCodeNerdFont {
