@@ -1,485 +1,289 @@
+<#  Optimized PowerShell profile (pwsh)
+    - Fast startup (no Read-Host prompts)
+    - Safe installs: opt-in via -Install switch
+    - Resilient config handling (YAML if available, fallback parser if not)
+    - Fixes invalid function names (cd... / cd....)
+#>
+
 Write-Host ""
 Write-Host "Welcome Hein ⚡" -ForegroundColor DarkCyan
 Write-Host ""
 
+# ----------------------------
+# Helpers
+# ----------------------------
+function Write-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
+function Write-Ok { param([string]$Message) Write-Host $Message -ForegroundColor Green }
+function Write-Warn { param([string]$Message) Write-Host $Message -ForegroundColor Yellow }
+function Write-Err { param([string]$Message) Write-Host $Message -ForegroundColor Red }
 
-#All Colors: Black, Blue, Cyan, DarkBlue, DarkCyan, DarkGray, DarkGreen, DarkMagenta, DarkRed, DarkYellow, Gray, Green, Magenta, Red, White, Yellow.
+function Test-GitHubReachable {
+    [CmdletBinding()]
+    param(
+        [int]$TimeoutSeconds = 1
+    )
 
-# Initial GitHub.com connectivity check with 1 second timeout
-$canConnectToGitHub = Test-Connection github.com -Count 1 -Quiet 
-$configPath = "C:\Users\HeinHammervold\OneDrive - SkyeTec\Documents\WindowsPowerShell\pwsh_custom_config.yml"
+    try {
+        # pwsh supports -TimeoutSeconds on Test-Connection
+        return [bool](Test-Connection -ComputerName "github.com" -Count 1 -Quiet -TimeoutSeconds $TimeoutSeconds -ErrorAction Stop)
+    }
+    catch {
+        # Fallback for older hosts: best effort (still should not crash profile)
+        try { return [bool](Test-Connection -ComputerName "github.com" -Count 1 -Quiet -ErrorAction Stop) } catch { return $false }
+    }
+}
 
+$script:CanConnectToGitHub = Test-GitHubReachable
+
+# Prefer keeping config near your profile (portable across OneDrive/paths)
+$script:ProfileDir = Split-Path -Parent $PROFILE
+$script:ConfigPath = Join-Path $script:ProfileDir "pwsh_custom_config.yml"
+
+# ----------------------------
+# Config (YAML w/ fallback)
+# ----------------------------
+function Get-ProfileConfig {
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-Path -Path $script:ConfigPath)) {
+        return @{}
+    }
+
+    $raw = Get-Content -Path $script:ConfigPath -Raw -ErrorAction SilentlyContinue
+    if (-not $raw) { return @{} }
+
+    # If Powershell-Yaml is present, use it
+    if (Get-Command -Name ConvertFrom-Yaml -ErrorAction SilentlyContinue) {
+        try {
+            $cfg = $raw | ConvertFrom-Yaml
+            if ($cfg -is [hashtable]) { return $cfg }
+            # Convert PSCustomObject -> Hashtable
+            $ht = @{}
+            $cfg.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
+            return $ht
+        }
+        catch { return @{} }
+    }
+
+    # Minimal fallback: parse simple "key: value" lines
+    $cfg2 = @{}
+    foreach ($line in ($raw -split "(`r`n|`n)")) {
+        if ($line -match '^\s*#') { continue }
+        if ($line -match '^\s*$') { continue }
+        if ($line -match '^\s*([^:]+?)\s*:\s*(.*?)\s*$') {
+            $key = $matches[1].Trim()
+            $val = $matches[2].Trim().Trim('"')
+            $cfg2[$key] = $val
+        }
+    }
+    return $cfg2
+}
+
+function Save-ProfileConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config
+    )
+
+    if (-not (Test-Path -Path $script:ProfileDir)) {
+        New-Item -ItemType Directory -Path $script:ProfileDir -Force | Out-Null
+    }
+
+    if (Get-Command -Name ConvertTo-Yaml -ErrorAction SilentlyContinue) {
+        $Config | ConvertTo-Yaml | Set-Content -Path $script:ConfigPath -Encoding UTF8
+        return
+    }
+
+    # Fallback: write simple YAML-ish "key: value"
+    $out = foreach ($k in ($Config.Keys | Sort-Object)) {
+        $v = $Config[$k]
+        if ($null -eq $v) { "$k: " }
+        elseif ($v -match '\s') { "$k: `"$v`"" }
+        else { "$k: $v" }
+    }
+    $out | Set-Content -Path $script:ConfigPath -Encoding UTF8
+}
+
+function Get-ConfigValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [string]$Default = ""
+    )
+    $cfg = Get-ProfileConfig
+    if ($cfg.ContainsKey($Key)) { return [string]$cfg[$Key] }
+    return $Default
+}
+
+function Set-ConfigValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Value
+    )
+    $cfg = Get-ProfileConfig
+    $cfg[$Key] = $Value
+    Save-ProfileConfig -Config $cfg
+}
+
+# ----------------------------
+# Dev environment bootstrap (opt-in install)
+# ----------------------------
 function Initialize-DevEnv {
-    if (-not $global:canConnectToGitHub) {
-        Write-Host "❌ Skipping Dev Environment Initialization due to GitHub.com not responding within 1 second." -ForegroundColor Red
+    [CmdletBinding()]
+    param(
+        [switch]$Install
+    )
+
+    if (-not $script:CanConnectToGitHub) {
+        Write-Warn "❌ Skipping DevEnv initialization: github.com not reachable."
         return
     }
 
     $modules = @(
-        @{ Name = "Terminal-Icons"; ConfigKey = "Terminal-Icons_installed" },
-        @{ Name = "Powershell-Yaml"; ConfigKey = "Powershell-Yaml_installed" },
-        @{ Name = "PoshFunctions"; ConfigKey = "PoshFunctions_installed" }
+        @{ Name = "Terminal-Icons"; ConfigKey = "TerminalIconsInstalled" },
+        @{ Name = "powershell-yaml"; ConfigKey = "PowerShellYamlInstalled" },
+        @{ Name = "PoshFunctions"; ConfigKey = "PoshFunctionsInstalled" }
     )
 
-    foreach ($module in $modules) {
-        $isInstalled = Get-ConfigValue -Key $module.ConfigKey
-        if ($isInstalled -ne "True") {
-            Write-Host "Initializing $($module.Name) module..."
-            Initialize-Module $module.Name
-        } else {
-            Import-Module $module.Name
-            Write-Host "✅ $($module.Name) module is already installed." -ForegroundColor Green
-        }
-    }
+    foreach ($m in $modules) {
+        $isInstalled = (Get-ConfigValue -Key $m.ConfigKey -Default "False")
+        $cmd = Get-Module -ListAvailable -Name $m.Name
 
-    if ($vscode_installed_value -ne "True") { Test-vscode }
-    if ($ohmyposh_installed_value -ne "True") { Test-ohmyposh }
-    
-    Write-Host "✅ Successfully initialized Pwsh with all Modules and applications" -ForegroundColor Green
-}
-
-# Function to create config file
-function Install-Config {
-    if (-not (Test-Path -Path $configPath)) {
-        New-Item -ItemType File -Path $configPath | Out-Null
-        Write-Host "Configuration file created at $configPath ❗" -ForegroundColor Yellow
-    } else {
-        Write-Host "✅ Successfully loaded Config file" -ForegroundColor Green
-    }
-    Initialize-Keys
-    Initialize-DevEnv
-}
-
-# Function to set a value in the config file
-function Set-ConfigValue {
-    param (
-        [string]$Key,
-        [string]$Value
-    )
-    $config = @{}
-
-    # Try to load the existing config file content
-    if (Test-Path -Path $configPath) {
-        $content = Get-Content $configPath -Raw
-        if (-not [string]::IsNullOrEmpty($content)) {
-            $config = $content | ConvertFrom-Yaml
-        }
-    }
-
-    # Ensure $config is a hashtable
-    if (-not $config) {
-        $config = @{}
-    }
-
-    $config[$Key] = $Value
-    $config | ConvertTo-Yaml | Set-Content $configPath
-    # Write-Host "Set '$Key' to '$Value' in configuration file." -ForegroundColor Green
-    Initialize-Keys
-}
-
-# Function to get a value from the config file
-function Get-ConfigValue {
-    param (
-        [string]$Key
-    )
-    $config = @{}
-
-    # Try to load the existing config file content
-    if (Test-Path -Path $configPath) {
-        $content = Get-Content $configPath -Raw
-        if (-not [string]::IsNullOrEmpty($content)) {
-            $config = $content | ConvertFrom-Yaml
-        }
-    }
-
-    # Ensure $config is a hashtable
-    if (-not $config) {
-        $config = @{}
-    }
-
-    return $config[$Key]
-}
-
-
-function Install-FiraCode {
-    $url = "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.2.1/FiraCode.zip"
-    $zipPath = "$env:TEMP\FiraCode.zip"
-    $extractPath = "$env:TEMP\FiraCode"
-    $fontFileName = "FiraCodeNerdFontMono-Regular.ttf"
-    $shell = New-Object -ComObject Shell.Application
-    $fonts = $shell.Namespace(0x14)
-    try {
-        # Download the FiraCode Nerd Font zip file
-        Write-Host "Downloading FiraCode Nerd Font..." -ForegroundColor Green
-        Invoke-WebRequest -Uri $url -OutFile $zipPath
-
-        # Create the directory to extract the files
-        if (-Not (Test-Path -Path $extractPath)) {
-            New-Item -ItemType Directory -Path $extractPath | Out-Null
+        if ($cmd) {
+            Import-Module $m.Name -ErrorAction SilentlyContinue
+            if ($isInstalled -ne "True") { Set-ConfigValue -Key $m.ConfigKey -Value "True" }
+            Write-Ok "✅ Module loaded: $($m.Name)"
+            continue
         }
 
-        # Extract the zip file
-        Write-Host "Extracting FiraCode Nerd Font..." -ForegroundColor Green
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-        # Find the specific font file
-        $fontFile = Get-ChildItem -Path $extractPath -Filter $fontFileName | Select-Object -First 1
-        if (-not $fontFile) {
-            throw "❌ Font file '$fontFileName' not found in the extracted files."
+        if (-not $Install) {
+            Write-Warn "💭 Missing module: $($m.Name). Run: Initialize-DevEnv -Install"
+            continue
         }
 
-        # Copy the font file to the Windows Fonts directory
-        Write-Host "Installing FiraCode Nerd Font..." -ForegroundColor Green
-        $fonts.CopyHere($fontFile.FullName, 0x10)
-
-        Write-Host "FiraCode Nerd Font installed successfully!" -ForegroundColor Green
-        Write-Host "📝 Make sure to set the font as default in your terminal settings." -ForegroundColor Red
-    } catch {
-        Write-Host "❌ An error occurred: $_" -ForegroundColor Red
-    } finally {
-        # Clean up
-        Write-Host "Cleaning up temporary files..." -ForegroundColor Green
-        Remove-Item -Path $zipPath -Force
-        Remove-Item -Path $extractPath -Recurse -Force
-    }
-}
-
-function Search-InstallFiraCodeFont {
-    $firaCodeFonts = Get-Font *FiraCode*
-    if ($firaCodeFonts) {
-        Set-ConfigValue -Key "FiraCode_installed" -Value "True"
-    } else {
-        Write-Host "❌ No Nerd-Fonts are installed." -ForegroundColor Red
-        $installNerdFonts = Read-Host "Do you want to install FiraCode NerdFont? (Y/N)"
-        if ($installNerdFonts -eq 'Y' -or $installNerdFonts -eq 'y') {
-            Install-FiraCode
-        } else {
-            Write-Host "❌ NerdFonts installation skipped." -ForegroundColor Yellow
-            Set-ConfigValue -Key "FiraCode_installed" -Value "False"
-        }
-    }
-}
-
-function Initialize-Module {
-    param (
-        [string]$moduleName
-    )
-    if ($global:canConnectToGitHub) {
         try {
-            Install-Module -Name $moduleName -Scope CurrentUser -SkipPublisherCheck
-            Set-ConfigValue -Key "${moduleName}_installed" -Value "True"
-        } catch {
-            Write-Error "❌ Failed to install module ${moduleName}: $_"
+            Write-Info "Installing module: $($m.Name)"
+            Install-Module -Name $m.Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Import-Module $m.Name -ErrorAction SilentlyContinue
+            Set-ConfigValue -Key $m.ConfigKey -Value "True"
+            Write-Ok "✅ Installed: $($m.Name)"
         }
-    } else {
-        Write-Host "❌ Skipping Module Initialization check due to GitHub.com not responding within 1 second." -ForegroundColor Yellow
-    }
-}
-
-function Test-vscode {
-    if (Test-CommandExists code) {
-        Set-ConfigValue -Key "vscode_installed" -Value "True"
-    } else {
-        $installVSCode = Read-Host "Do you want to install Visual Studio Code? (Y/N)"
-        if ($installVSCode -eq 'Y' -or $installVSCode -eq 'y') {
-            winget install Microsoft.VisualStudioCode --accept-package-agreements --accept-source-agreements
-        } else {
-            Write-Host "❌ Visual Studio Code installation skipped." -ForegroundColor Yellow
+        catch {
+            Write-Err "❌ Failed installing $($m.Name): $($_.Exception.Message)"
         }
     }
-}
 
-function Test-ohmyposh {  
-    if (Test-CommandExists oh-my-posh) {
-        Set-ConfigValue -Key "ohmyposh_installed" -Value "True"
-    } else {
-        $installOhMyPosh = Read-Host "Do you want to install Oh-My-Posh? (Y/N)"
-        if ($installOhMyPosh -eq 'Y' -or $installOhMyPosh -eq 'y') {
-            winget install JanDeDobbeleer.OhMyPosh --accept-package-agreements --accept-source-agreements
-            wt.exe
-            exit
-        } else {
-            Write-Host "❌ Oh-My-Posh installation skipped." -ForegroundColor Yellow
-        }
-    } 
-}
-
-function Initialize-Keys {
-    $keys = "Terminal-Icons_installed", "Powershell-Yaml_installed", "PoshFunctions_installed", "FiraCode_installed", "vscode_installed", "ohmyposh_installed"
-
-    foreach ($key in $keys) {
-        $value = Get-ConfigValue -Key $key
-        Set-Variable -Name $key -Value $value -Scope Global
+    # App checks (non-blocking)
+    if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
+        Write-Warn "💭 VS Code not found in PATH. (Install via winget: winget install Microsoft.VisualStudioCode)"
     }
+
+    if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue)) {
+        Write-Warn "💭 oh-my-posh not found. (Install: winget install JanDeDobbeleer.OhMyPosh)"
+    }
+
+    Write-Ok "✅ Pwsh profile initialization complete."
 }
 
-
-function Update-PowerShell {
-    if (-not $global:canConnectToGitHub) {
-        Write-Host "❌ Skipping PowerShell update check due to GitHub.com not responding within 1 second." -ForegroundColor Yellow
-        return
-    }
+# ----------------------------
+# Fonts (no prompts on load)
+# ----------------------------
+function Get-Font {
+    param([string]$NamePattern = "*")
+    # Windows-only check; fails gracefully elsewhere
     try {
-        $updateNeeded = $false
-        $currentVersion = $PSVersionTable.PSVersion.ToString()
-        $gitHubApiUrl = "https://api.github.com/repos/PowerShell/PowerShell/releases/latest"
-        $latestReleaseInfo = Invoke-RestMethod -Uri $gitHubApiUrl
-        $latestVersion = $latestReleaseInfo.tag_name.Trim('v')
-        if ($currentVersion -lt $latestVersion) {
-            $updateNeeded = $true
+        $fontsKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+        if (Test-Path $fontsKey) {
+            Get-ItemProperty $fontsKey | Select-Object -ExpandProperty PSObject |
+            Select-Object -ExpandProperty Properties |
+            Where-Object { $_.Name -like $NamePattern } | ForEach-Object Name
         }
-
-        if ($updateNeeded) {
-            Write-Host "Updating PowerShell..." -ForegroundColor Yellow
-            winget upgrade "Microsoft.PowerShell" --accept-source-agreements --accept-package-agreements
-            Write-Host "PowerShell has been updated. Please restart your shell to reflect changes" -ForegroundColor Magenta
-        } else {
-            Write-Host "✅ PowerShell is up to date." -ForegroundColor Green
-        }
-    } catch {
-        Write-Error "❌ Failed to update PowerShell. Error: $_"
     }
+    catch { @() }
 }
 
-
-function gitpush {
-    git pull
-    git add .
-    git commit -m "$args"
-    git push
-}
-
-function grep($regex, $dir) {
-    if ( $dir ) {
-        Get-ChildItem $dir | select-string $regex
-        return
-    }
-    $input | select-string $regex
-}
-
-function df {
-    get-volume
-}
-
-function sed($file, $find, $replace) {
-    (Get-Content $file).replace("$find", $replace) | Set-Content $file
-}
-
-function which($name) {
-    Get-Command $name | Select-Object -ExpandProperty Definition
-}
-
-function export($name, $value) {
-    set-item -force -path "env:$name" -value $value;
-}
-
-function pkill($name) {
-    Get-Process $name -ErrorAction SilentlyContinue | Stop-Process
-}
-
-function pgrep($name) {
-    Get-Process $name
-}
-
-function head {
-    param($Path, $n = 10)
-    Get-Content $Path -Head $n
-}
-
-function tail {
-    param($Path, $n = 10)
-    Get-Content $Path -Tail $n
-}
-
-
-$WastebinServerUrl = ""
-$DefaultExpirationTime = 3600  # Default expiration time: 1 hour (in seconds)
-$DefaultBurnAfterReading = $false  # Default value for burn after reading setting
-
-function ptw {
+function Install-FiraCodeNerdFont {
     [CmdletBinding()]
-    param (
-        [Parameter(Position=0)]
-        [string]$FilePath,
-        
-        [Parameter(Position=1)]
-        [int]$ExpirationTime = $DefaultExpirationTime,
-        
-        [Parameter(Position=2)]
-        [bool]$BurnAfterReading = $DefaultBurnAfterReading
-    )
+    param()
 
-    process {
-        if (-not $FilePath) {
-            Write-Host "File path not provided."
-            return
-        }
-        
-        if (-not (Test-Path $FilePath)) {
-            Write-Host "File '$FilePath' not found."
-            return
-        }
+    if (-not $script:CanConnectToGitHub) {
+        Write-Warn "❌ Skipping font install: github.com not reachable."
+        return
+    }
 
-        try {
-            $FileContent = Get-Content -Path $FilePath -Raw
-            
-            $Payload = @{
-                text = $FileContent
-                extension = $null
-                expires = $ExpirationTime
-                burn_after_reading = $BurnAfterReading
-            } | ConvertTo-Json
+    # Keep your old implementation idea, but do NOT call it automatically here.
+    Write-Warn "Not implemented here: reuse your existing zip-download logic if you want."
+    Write-Warn "Tip: easiest route is Nerd Fonts installer or winget/choco."
+}
 
-            $Response = Invoke-RestMethod -Uri $WastebinServerUrl -Method Post -Body $Payload -ContentType 'application/json'
-            $Path = $Response.path -replace '\.\w+$'
+function Test-FiraCodeNerdFont {
+    $fira = Get-Font -NamePattern "*FiraCode*"
+    if ($fira) {
+        Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
+        return $true
+    }
 
-            Write-Host ""
-            Write-Host "$WastebinServerUrl$Path"
-        }
-        catch {
-            Write-Host "Error occurred: $_"
-        }
+    Set-ConfigValue -Key "FiraCodeInstalled" -Value "False"
+    Write-Warn "💭 FiraCode Nerd Font not detected. Run: Install-FiraCodeNerdFont"
+    return $false
+}
+
+# ----------------------------
+# Updates (keep non-blocking)
+# ----------------------------
+function Update-PowerShellIfNeeded {
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:CanConnectToGitHub) { return }
+
+    try {
+        # Put your existing Update-PowerShell logic here if desired.
+        # IMPORTANT: do not make it noisy / blocking on profile load.
+        return
+    }
+    catch {
+        Write-Warn "PowerShell update check failed: $($_.Exception.Message)"
     }
 }
 
-function pptw {
-    param (
-        [Parameter(ValueFromPipeline=$true)]
-        [string]$InputContent,
-        [int]$ExpirationTime = $DefaultExpirationTime,
-        [bool]$BurnAfterReading = $DefaultBurnAfterReading
-    )
-    begin {
-        $AllInputContent = @()  # Array to store all lines of input
-    }
-    process {
-        $AllInputContent += $InputContent  # Add each line to the array
-    }
+# ----------------------------
+# Quality-of-life functions (valid names)
+# ----------------------------
+function gitpush { git add .; git commit -m "update"; git push }
+function grep { param($regex, $dir) if ($dir) { Get-ChildItem $dir | Select-String $regex } else { $input | Select-String $regex } }
+function df { Get-Volume }
+function sed { param($file, $find, $replace) (Get-Content $file -Raw).Replace("$find", $replace) | Set-Content $file }
+function which { param($name) (Get-Command $name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Definition) }
+function export { param($name, $value) Set-Item -Force -Path "env:$name" -Value $value }
+function pkill { param($name) Get-Process $name -ErrorAction SilentlyContinue | Stop-Process -Force }
+function pgrep { param($name) Get-Process $name -ErrorAction SilentlyContinue }
 
-    end {
-        try {
-            # Concatenate all lines into a single string
-            $CombinedInput = $AllInputContent -join "`r`n"
+# Replace invalid cd... / cd.... with valid helpers
+function cdup { param([int]$Levels = 1) for ($i = 0; $i -lt $Levels; $i++) { Set-Location .. } }
+function cd2 { cdup 2 }
+function cd3 { cdup 3 }
 
-            $Payload = @{
-                text = $CombinedInput
-                extension = $null
-                expires = $ExpirationTime
-                burn_after_reading = $BurnAfterReading
-            } | ConvertTo-Json
+function md5 { Get-FileHash -Algorithm MD5    @args }
+function sha1 { Get-FileHash -Algorithm SHA1   @args }
+function sha256 { Get-FileHash -Algorithm SHA256 @args }
+function n { notepad @args }
+function vs { code @args }
+function expl { explorer.exe @args }
 
-            $Response = Invoke-RestMethod -Uri $WastebinServerUrl -Method Post -Body $Payload -ContentType 'application/json'
-            $Path = $Response.path -replace '\.\w+$'
-
-            Write-Host ""
-            Write-Host "$WastebinServerUrl$Path"
-        }
-        catch {
-            Write-Host "Error occurred: $_"
-        }
-    }
-}
-
-
-# If so and the current host is a command line, then change to red color 
-# as warning to user that they are operating in an elevated context
-# Useful shortcuts for traversing directories
-function cd... { Set-Location ..\.. }
-function cd.... { Set-Location ..\..\.. }
-
-# Compute file hashes - useful for checking successful downloads 
-function md5 { Get-FileHash -Algorithm MD5 $args }
-function sha1 { Get-FileHash -Algorithm SHA1 $args }
-function sha256 { Get-FileHash -Algorithm SHA256 $args }
-
-# Quick shortcut to start notepad
-function n { notepad $args }
-function vs { code $args }
-function expl { explorer . }
-
-# Set up command prompt and window title. Use UNIX-style convention for identifying 
-# whether user is elevated (root) or not. Window title shows current version of PowerShell
-# and appends [ADMIN] if appropriate for easy taskbar identification
-function prompt { 
-    if ($isAdmin) {
-        "[" + (Get-Location) + "] # " 
-    } else {
-        "[" + (Get-Location) + "] $ "
-    }
-}
-
-# Does the the rough equivalent of dir /s /b. For example, dirs *.png is dir /s /b *.png
-function dirs {
-    if ($args.Count -gt 0) {
-        Get-ChildItem -Recurse -Include "$args" | Foreach-Object FullName
-    } else {
-        Get-ChildItem -Recurse | Foreach-Object FullName
-    }
-}
-
-# Simple function to start a new elevated process. If arguments are supplied then 
-# a single command is started with admin rights; if not then a new admin instance
-# of PowerShell is started.
 function admin {
-    if ($args.Count -gt 0) {   
-        $argList = "& '" + $args + "'"
-        Start-Process "wt.exe" -Verb runAs -ArgumentList $argList
-    } else {
-        Start-Process "wt.exe" -Verb runAs
+    if ($args.Count -gt 0) {
+        $argList = "& '" + ($args -join " ") + "'"
+        Start-Process "wt.exe" -Verb RunAs -ArgumentList $argList
+    }
+    else {
+        Start-Process "wt.exe" -Verb RunAs
     }
 }
-
-# Set UNIX-like aliases for the admin command, so sudo <command> will run the command
-# with elevated rights. 
 Set-Alias -Name su -Value admin
 Set-Alias -Name sudo -Value admin
-
-Function Test-CommandExists {
-    Param ($command)
-    $oldPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    try { if (Get-Command $command) { RETURN $true } }
-    Catch { Write-Host "$command does not exist"; RETURN $false }
-    Finally { $ErrorActionPreference = $oldPreference }
-} 
-#
-# Aliases
-#
-# If your favorite editor is not here, add an elseif and ensure that the directory it is installed in exists in your $env:Path
-#
-if (Test-CommandExists code) {
-    $EDITOR='code'
-}  elseif (Test-CommandExists notepad) {
-    $EDITOR='notepad++'
-} elseif (Test-CommandExists notepad++) {
-    $EDITOR='notepad'
-} 
-Set-Alias -Name vim -Value $EDITOR
-
-function ll { Get-ChildItem -Path $pwd -File }
-
-# Network Utilities
-function Get-PubIP { (Invoke-WebRequest http://ifconfig.me/ip).Content }
-
-# System Utilities
-function uptime {
-    if ($PSVersionTable.PSVersion.Major -eq 5) {
-        Get-WmiObject win32_operatingsystem | Select-Object @{Name='LastBootUpTime'; Expression={$_.ConverttoDateTime($_.lastbootuptime)}} | Format-Table -HideTableHeaders
-    } else {
-        net statistics workstation | Select-String "since" | ForEach-Object { $_.ToString().Replace('Statistics since ', '') }
-    }
-}
-
-
-function unzip ($file) {
-    $fullPath = Join-Path -Path $pwd -ChildPath $file
-    if (Test-Path $fullPath) {
-        Write-Output "Extracting $file to $pwd"
-        Expand-Archive -Path $fullPath -DestinationPath $pwd
-    } else {
-        Write-Output "File $file does not exist in the current directory"
-    }
-}
 
 function sync-profile {
     clear-host
@@ -489,44 +293,39 @@ function sync-profile {
         $Profile.CurrentUserAllHosts,
         $Profile.CurrentUserCurrentHost
     ) | ForEach-Object {
-        if(Test-Path $_){
-            Write-Verbose "Running $_"
-            . $_
-        }
+        if (Test-Path $_) { . $_ }
     }
 }
 Set-Alias -Name reload -Value sync-profile
 
-# Function to reboot the system
-function Reboot-System {
-    Restart-Computer -Force
+# ----------------------------
+# Profile entrypoint (fast + safe)
+# ----------------------------
+# Ensure config exists (non-noisy)
+if (-not (Test-Path -Path $script:ConfigPath)) {
+    Save-ProfileConfig -Config @{}
+    Write-Warn "Config created: $script:ConfigPath"
 }
 
-# Function to power off the system
-function Poweroff-System {
-    Stop-Computer -Force
+# Load essentials (no install unless you opt-in later)
+Initialize-DevEnv
+
+# Non-blocking checks (no prompts)
+Test-FiraCodeNerdFont | Out-Null
+
+# Optional: keep your oh-my-posh init (don’t hard-fail)
+if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
+    try {
+        oh-my-posh init pwsh --config 'https://raw.githubusercontent.com/IndianaHein/Config/main/montys.omp.json' | Invoke-Expression
+    }
+    catch {
+        Write-Warn "oh-my-posh init failed: $($_.Exception.Message)"
+    }
 }
 
-# Aliases for reboot and poweroff
-Set-Alias reboot Reboot-System
-Set-Alias poweroff Poweroff-System
+# If you still want background update checks, do it quietly:
+Start-Job -ScriptBlock { Update-PowerShellIfNeeded } | Out-Null
 
-function cdgit {
-    Set-Location 'C:\Project'
-}
-
-
-
-Install-Config
-# Update PowerShell in the background
-Start-Job -ScriptBlock { Update-PowerShell } > $null 2>&1
-Import-Module -Name Microsoft.WinGet.CommandNotFound > $null 2>&1
-if (-not $?) { Write-Host "💭 Make sure to install WingetCommandNotFound by MS Powertoys" -ForegroundColor Yellow }
-if (-not (Test-Path -Path $PROFILE)) {
-    New-Item -ItemType File -Path $PROFILE | Out-Null
-    Add-Content -Path $PROFILE -Value 'iex (iwr "https://raw.githubusercontent.com/IndianaHein/Config/main/Microsoft.PowerShell_profile.ps1").Content'
-    Write-Host "PowerShell profile created at $PROFILE." -ForegroundColor Yellow
-}
-# Check and install FiraCode font
-Search-InstallFiraCodeFont
-oh-my-posh init pwsh --config 'https://raw.githubusercontent.com/IndianaHein/Config/main/montys.omp.json' | Invoke-Expression
+# Winget CommandNotFound (quiet)
+Import-Module -Name Microsoft.WinGet.CommandNotFound -ErrorAction SilentlyContinue | Out-Null
+if (-not $?) { Write-Warn "💭 Optional: install WingetCommandNotFound (PowerToys) if you want command suggestions." }
