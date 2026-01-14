@@ -218,50 +218,105 @@ function Get-InstalledFont {
 
 function Install-FiraCodeNerdFont {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet("Winget", "Zip")]
+        [string]$Method = "Winget"
+    )
 
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Warn "winget not found. Install App Installer from Microsoft Store (or use the ZIP method)."
+    if ($Method -eq "Winget") {
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Warn "winget not found. Re-run with: Install-FiraCodeNerdFont -Method Zip"
+            return
+        }
+
+        # Try a few likely IDs; if they don't exist, fall back to search parsing
+        $candidateIds = @(
+            "NerdFonts.FiraCode",
+            "NerdFonts.FiraCode.NerdFont",
+            "NerdFonts.FiraCodeNerdFont"
+        )
+
+        $id = $null
+        foreach ($cid in $candidateIds) {
+            winget show --id $cid --exact *> $null
+            if ($LASTEXITCODE -eq 0) { $id = $cid; break }
+        }
+
+        if (-not $id) {
+            Write-Info "Searching winget for FiraCode Nerd Font..."
+            $search = winget search "FiraCode" 2>$null
+            $line = ($search | Select-String -Pattern "NerdFonts\." | Select-Object -First 1).Line
+            if ($line) {
+                $parts = $line -split '\s{2,}'
+                if ($parts.Count -ge 2) { $id = $parts[1] }
+            }
+        }
+
+        if (-not $id) {
+            Write-Warn "Could not find a NerdFonts package for FiraCode in winget. Re-run with: Install-FiraCodeNerdFont -Method Zip"
+            return
+        }
+
+        Write-Info "Installing via winget: $id"
+        winget install --id $id --exact --accept-source-agreements --accept-package-agreements
+
+        if (Test-FiraCodeNerdFont) {
+            Write-Ok "✅ FiraCode Nerd Font installed/detected."
+        }
+        else {
+            Write-Warn "Installed, but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)."
+        }
         return
     }
 
-    # Name may vary slightly depending on winget catalog; search first
-    $query = "FiraCode Nerd Font"
-    $search = winget search --name $query 2>$null
+    # ZIP method (no winget)
+    $releaseTag = "v3.2.1"
+    $zipUrl = "https://github.com/ryanoasis/nerd-fonts/releases/download/$releaseTag/FiraCode.zip"
 
-    if (-not $search) {
-        Write-Warn "No winget search results for '$query'. Use the ZIP method instead."
-        return
+    $tempZip = Join-Path $env:TEMP "FiraCode.NerdFont.zip"
+    $tempDir = Join-Path $env:TEMP ("FiraCodeNerdFont_" + [guid]::NewGuid().ToString("N"))
+
+    try {
+        Write-Info "Downloading: $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        Expand-Archive -Path $tempZip -DestinationPath $tempDir -Force
+
+        $userFonts = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"
+        New-Item -ItemType Directory -Path $userFonts -Force | Out-Null
+
+        $ttfs = Get-ChildItem -Path $tempDir -Recurse -File -Filter "*.ttf" |
+        Where-Object { $_.Name -match "FiraCode" }
+
+        if (-not $ttfs) { throw "No FiraCode TTF files found in the downloaded ZIP." }
+
+        foreach ($f in $ttfs) {
+            Copy-Item -Path $f.FullName -Destination (Join-Path $userFonts $f.Name) -Force
+        }
+
+        # Register in HKCU (best-effort)
+        $fontsKey = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+        if (-not (Test-Path $fontsKey)) { New-Item -Path $fontsKey -Force | Out-Null }
+
+        foreach ($f in $ttfs) {
+            $valueName = $f.BaseName + " (TrueType)"
+            New-ItemProperty -Path $fontsKey -Name $valueName -Value $f.Name -PropertyType String -Force | Out-Null
+        }
+
+        if (Test-FiraCodeNerdFont) {
+            Write-Ok "✅ FiraCode Nerd Font installed/detected."
+        }
+        else {
+            Write-Warn "Installed, but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)."
+        }
     }
-
-    Write-Info "Installing via winget (you may get a UAC prompt)..."
-    # Common package id in Nerd Fonts is "NerdFonts.FiraCode" but we search first to avoid guessing
-    $idLine = ($search | Select-String -Pattern "NerdFonts\." | Select-Object -First 1).Line
-    if (-not $idLine) {
-        Write-Warn "Could not identify a NerdFonts package id from winget search output."
-        Write-Host $search
-        return
-    }
-
-    # Try to extract the Id column (winget output is space aligned; this is best-effort)
-    $id = ($idLine -split '\s{2,}')[1]
-    if (-not $id) {
-        Write-Warn "Failed to parse package id. Copy the Id from winget search output and install manually:"
-        Write-Host "winget install --id <ID> --exact" -ForegroundColor DarkGray
-        Write-Host $search
-        return
-    }
-
-    winget install --id $id --exact --accept-source-agreements --accept-package-agreements
-
-    # Re-check
-    if (Test-FiraCodeNerdFont) {
-        Write-Ok "✅ FiraCode Nerd Font installed/detected."
-    }
-    else {
-        Write-Warn "Install completed but font still not detected. You may need to restart apps (or sign out/in)."
+    finally {
+        Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 
 
 function Test-FiraCodeNerdFont {
