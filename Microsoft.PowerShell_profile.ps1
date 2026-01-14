@@ -36,7 +36,7 @@ function Test-GitHubReachable {
 $script:CanConnectToGitHub = Test-GitHubReachable
 
 # Platform flags
-$IsWindowsPlatform = $IsWindows -or ($env:OS -eq 'Windows_NT')
+#$IsWindowsPlatform = $IsWindows -or ($env:OS -eq 'Windows_NT')
 # Detect interactive host (avoid server remote hosts)
 $IsInteractive = -not ($Host.Name -in @('ServerRemoteHost', 'ConsoleHost'))
 
