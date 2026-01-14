@@ -190,19 +190,26 @@ function Initialize-DevEnv {
 # ----------------------------
 # Fonts (no prompts on load)
 # ----------------------------
-function Get-Font {
-    param([string]$NamePattern = "*")
-    # Windows-only check; fails gracefully elsewhere
+function Get-InstalledFont {
+    param(
+        [string]$NamePattern = "*"
+    )
+
     try {
         $fontsKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
         if (Test-Path $fontsKey) {
-            Get-ItemProperty $fontsKey | Select-Object -ExpandProperty PSObject |
+            Get-ItemProperty $fontsKey |
+            Select-Object -ExpandProperty PSObject |
             Select-Object -ExpandProperty Properties |
-            Where-Object { $_.Name -like $NamePattern } | ForEach-Object Name
+            Where-Object { $_.Name -like $NamePattern } |
+            ForEach-Object Name
         }
     }
-    catch { @() }
+    catch {
+        @()
+    }
 }
+
 
 function Install-FiraCodeNerdFont {
     [CmdletBinding()]
@@ -219,7 +226,7 @@ function Install-FiraCodeNerdFont {
 }
 
 function Test-FiraCodeNerdFont {
-    $fira = Get-Font -NamePattern "*FiraCode*"
+    $fira = Get-InstalledFont -NamePattern "*FiraCode*"
     if ($fira) {
         Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
         return $true
