@@ -525,7 +525,6 @@ function Enable-WingetCommandNotFound {
 
     $moduleName = "Microsoft.WinGet.CommandNotFound"
 
-    # Try import first
     if (Get-Module -ListAvailable -Name $moduleName) {
         Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
         if (Get-Module -Name $moduleName) {
@@ -534,43 +533,8 @@ function Enable-WingetCommandNotFound {
         }
     }
 
-    if (-not $Install) {
-        return $false
-    }
-    function Enable-WingetCommandNotFound {
-        [CmdletBinding()]
-        param(
-            [switch]$Install
-        )
+    if (-not $Install) { return $false }
 
-        $moduleName = "Microsoft.WinGet.CommandNotFound"
-
-        if (Get-Module -ListAvailable -Name $moduleName) {
-            Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
-            if (Get-Module -Name $moduleName) {
-                Write-Host "✅ Winget CommandNotFound enabled." -ForegroundColor Green
-                return $true
-            }
-        }
-
-        if (-not $Install) { return $false }
-
-        try {
-            Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-            Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
-            if (Get-Module -Name $moduleName) {
-                Write-Host "✅ Installed + enabled Winget CommandNotFound." -ForegroundColor Green
-                return $true
-            }
-        }
-        catch {
-            Write-Host ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message) -ForegroundColor Red
-        }
-
-        return $false
-    }
-
-    # Install (PSGallery) if requested
     try {
         Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
         Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
@@ -580,10 +544,26 @@ function Enable-WingetCommandNotFound {
         }
     }
     catch {
-        Write-Host "❌ Failed to install ${moduleName}: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message) -ForegroundColor Red
     }
 
     return $false
+}
+
+# Install (PSGallery) if requested
+try {
+    Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+    Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
+    if (Get-Module -Name $moduleName) {
+        Write-Host "✅ Installed + enabled Winget CommandNotFound." -ForegroundColor Green
+        return $true
+    }
+}
+catch {
+    Write-Host "❌ Failed to install ${moduleName}: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+return $false
 }
 
 # VSCode-only prompt (ask once)
