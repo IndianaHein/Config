@@ -548,7 +548,7 @@ function Enable-WingetCommandNotFound {
         }
     }
     catch {
-        Write-Host "❌ Failed to install $moduleName: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "❌ Failed to install ${moduleName}: $($_.Exception.Message)" -ForegroundColor Red
     }
 
     return $false
