@@ -220,15 +220,49 @@ function Install-FiraCodeNerdFont {
     [CmdletBinding()]
     param()
 
-    if (-not $script:CanConnectToGitHub) {
-        Write-Warn "❌ Skipping font install: github.com not reachable."
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Warn "winget not found. Install App Installer from Microsoft Store (or use the ZIP method)."
         return
     }
 
-    # Keep your old implementation idea, but do NOT call it automatically here.
-    Write-Warn "Not implemented here: reuse your existing zip-download logic if you want."
-    Write-Warn "Tip: easiest route is Nerd Fonts installer or winget/choco."
+    # Name may vary slightly depending on winget catalog; search first
+    $query = "FiraCode Nerd Font"
+    $search = winget search --name $query 2>$null
+
+    if (-not $search) {
+        Write-Warn "No winget search results for '$query'. Use the ZIP method instead."
+        return
+    }
+
+    Write-Info "Installing via winget (you may get a UAC prompt)..."
+    # Common package id in Nerd Fonts is "NerdFonts.FiraCode" but we search first to avoid guessing
+    $idLine = ($search | Select-String -Pattern "NerdFonts\." | Select-Object -First 1).Line
+    if (-not $idLine) {
+        Write-Warn "Could not identify a NerdFonts package id from winget search output."
+        Write-Host $search
+        return
+    }
+
+    # Try to extract the Id column (winget output is space aligned; this is best-effort)
+    $id = ($idLine -split '\s{2,}')[1]
+    if (-not $id) {
+        Write-Warn "Failed to parse package id. Copy the Id from winget search output and install manually:"
+        Write-Host "winget install --id <ID> --exact" -ForegroundColor DarkGray
+        Write-Host $search
+        return
+    }
+
+    winget install --id $id --exact --accept-source-agreements --accept-package-agreements
+
+    # Re-check
+    if (Test-FiraCodeNerdFont) {
+        Write-Ok "✅ FiraCode Nerd Font installed/detected."
+    }
+    else {
+        Write-Warn "Install completed but font still not detected. You may need to restart apps (or sign out/in)."
+    }
 }
+
 
 function Test-FiraCodeNerdFont {
     $fira = Get-InstalledFont -NamePattern "*FiraCode*"
