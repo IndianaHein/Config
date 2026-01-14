@@ -533,31 +533,18 @@ function Enable-WingetCommandNotFound {
 
     $moduleName = "Microsoft.WinGet.CommandNotFound"
 
-    if (Get-Module -ListAvailable -Name $moduleName) {
-        Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
-        if (Get-Module -Name $moduleName) {
-            Write-Host "✅ Winget CommandNotFound enabled." -ForegroundColor Green
-            return $true
-        }
+    $moduleAvailable = [bool](Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue)
+    if ($moduleAvailable) {
+        Import-Module -Name $moduleName -ErrorAction SilentlyContinue | Out-Null
     }
 
-    if (-not $Install) { return $false }
-
-    try {
-        Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-        Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
-        if (Get-Module -Name $moduleName) {
-            Write-Host "✅ Installed + enabled Winget CommandNotFound." -ForegroundColor Green
-            return $true
-        }
+    $moduleLoaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
+    if (-not $moduleLoaded) {
+        Write-Warn "💭 Optional: enable Winget CommandNotFound suggestions by installing/importing the module '$moduleName'."
+        # If you want to offer install:
+        # Write-Warn "Install: Install-Module $moduleName -Scope CurrentUser"
     }
-    catch {
-        Write-Host ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message) -ForegroundColor Red
-    }
-
-    return $false
 }
-
 # (Removed stray global Install-Module block that referenced undefined `$moduleName`.)
 
 
