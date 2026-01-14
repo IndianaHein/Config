@@ -191,28 +191,42 @@ function Initialize-DevEnv {
 # Fonts (no prompts on load)
 # ----------------------------
 function Get-InstalledFont {
+    [CmdletBinding()]
     param(
         [string]$NamePattern = "*"
     )
 
-    try {
-        $fontsKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-        if (-not (Test-Path $fontsKey)) { return @() }
+    $paths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
+        "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+    )
 
-        $item = Get-ItemProperty -Path $fontsKey
+    $results = New-Object System.Collections.Generic.List[string]
 
-        # Enumerate value names under the key (these are the font display names)
-        $item.PSObject.Properties |
-        Where-Object {
-            $_.MemberType -eq 'NoteProperty' -and
-            $_.Name -like $NamePattern
-        } |
-        ForEach-Object { $_.Name }
+    foreach ($p in $paths) {
+        if (-not (Test-Path $p)) { continue }
+
+        try {
+            $item = Get-ItemProperty -Path $p -ErrorAction Stop
+
+            foreach ($prop in $item.PSObject.Properties) {
+                # Skip engine props like PSPath/PSParentPath/etc.
+                if ($prop.Name -like "PS*") { continue }
+
+                # Match on registry value NAME
+                if ($prop.Name -like $NamePattern) { [void]$results.Add($prop.Name) }
+
+                # Also match on registry value DATA (often the .ttf filename)
+                $data = [string]$prop.Value
+                if ($data -and ($data -like $NamePattern)) { [void]$results.Add($data) }
+            }
+        }
+        catch { }
     }
-    catch {
-        @()
-    }
+
+    $results | Sort-Object -Unique
 }
+
 
 
 
@@ -348,16 +362,63 @@ function Install-FiraCodeNerdFont {
 
 
 function Test-FiraCodeNerdFont {
-    $fira = Get-InstalledFont -NamePattern "*FiraCode*"
-    if ($fira) {
-        Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
-        return $true
+    [CmdletBinding()]
+    param(
+        [string[]]$NamePatterns = @(
+            "*FiraCode*",
+            "*Fira Code*",
+            "*FiraCodeNerdFont*"
+        )
+    )
+
+    # A) Check font files (fast and reliable)
+    $fontDirs = @(
+        (Join-Path $env:WINDIR "Fonts"),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts")
+    ) | Where-Object { Test-Path $_ }
+
+    foreach ($dir in $fontDirs) {
+        foreach ($pat in $NamePatterns) {
+            $files = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like ($pat.Trim('*') + "*.ttf") -or $_.Name -like $pat }
+            if ($files) {
+                Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
+                return $true
+            }
+        }
+    }
+
+    # B) Check registry (HKLM + HKCU, name and value)
+    foreach ($pat in $NamePatterns) {
+        $hits = Get-InstalledFont -NamePattern $pat
+        if ($hits -and $hits.Count -gt 0) {
+            Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
+            return $true
+        }
+    }
+
+    # C) Check installed font families (best signal when registry/file naming differs)
+    if ($IsWindows) {
+        try {
+            Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue | Out-Null
+            $fc = New-Object System.Drawing.Text.InstalledFontCollection
+            $families = $fc.Families | ForEach-Object { $_.Name }
+
+            foreach ($name in $families) {
+                if ($name -match 'Fira\s*Code') {
+                    Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
+                    return $true
+                }
+            }
+        }
+        catch { }
     }
 
     Set-ConfigValue -Key "FiraCodeInstalled" -Value "False"
     Write-Warn "💭 FiraCode Nerd Font not detected. Run: Install-FiraCodeNerdFont"
     return $false
 }
+
 
 # ----------------------------
 # Updates (keep non-blocking)
