@@ -564,7 +564,7 @@ catch {
 }
 
 return $false
-}
+
 
 # VSCode-only prompt (ask once)
 try {
