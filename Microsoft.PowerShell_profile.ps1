@@ -35,6 +35,11 @@ function Test-GitHubReachable {
 
 $script:CanConnectToGitHub = Test-GitHubReachable
 
+# Platform flags
+$IsWindows = $env:OS -eq 'Windows_NT'
+# Detect interactive host (avoid server remote hosts)
+$IsInteractive = -not ($Host.Name -in @('ServerRemoteHost', 'ConsoleHost'))
+
 # Prefer keeping config near your profile (portable across OneDrive/paths)
 $script:ProfileDir = Split-Path -Parent $PROFILE
 $script:ConfigPath = Join-Path $script:ProfileDir "pwsh_custom_config.yml"
@@ -103,6 +108,9 @@ function Save-ProfileConfig {
         else { "${k}: $v" }
     }
 
+    # Persist fallback config to file
+    $out -join "`n" | Set-Content -Path $script:ConfigPath -Encoding UTF8
+    return
 }
 
 function Get-ConfigValue {
@@ -550,20 +558,7 @@ function Enable-WingetCommandNotFound {
     return $false
 }
 
-# Install (PSGallery) if requested
-try {
-    Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-    Import-Module $moduleName -ErrorAction SilentlyContinue | Out-Null
-    if (Get-Module -Name $moduleName) {
-        Write-Host "✅ Installed + enabled Winget CommandNotFound." -ForegroundColor Green
-        return $true
-    }
-}
-catch {
-    Write-Host "❌ Failed to install ${moduleName}: $($_.Exception.Message)" -ForegroundColor Red
-}
-
-return $false
+# (Removed stray global Install-Module block that referenced undefined `$moduleName`.)
 
 
 # VSCode-only prompt (ask once)
