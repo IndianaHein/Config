@@ -98,11 +98,11 @@ function Save-ProfileConfig {
     # Fallback: write simple YAML-ish "key: value"
     $out = foreach ($k in ($Config.Keys | Sort-Object)) {
         $v = $Config[$k]
-        if ($null -eq $v) { "$k: " }
-        elseif ($v -match '\s') { "$k: `"$v`"" }
-        else { "$k: $v" }
+        if ($null -eq $v) { "${k}: " }
+        elseif ($v -match '\s') { "${k}: `"$v`"" }
+        else { "${k}: $v" }
     }
-    $out | Set-Content -Path $script:ConfigPath -Encoding UTF8
+
 }
 
 function Get-ConfigValue {
