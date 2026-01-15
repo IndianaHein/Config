@@ -528,48 +528,57 @@ Start-Job -ScriptBlock { Update-PowerShellIfNeeded } | Out-Null
 function Enable-WingetCommandNotFound {
     [CmdletBinding()]
     param(
+        [switch]$PromptOnce,
         [switch]$Install
     )
 
     $moduleName = "Microsoft.WinGet.CommandNotFound"
 
-    $moduleAvailable = [bool](Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue)
-    if ($moduleAvailable) {
-        Import-Module -Name $moduleName -ErrorAction SilentlyContinue | Out-Null
-    }
+    # Try import if available
+    $available = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue |
+    Sort-Object Version -Descending |
+    Select-Object -First 1
 
-    $moduleLoaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
-    if (-not $moduleLoaded) {
-        Write-Warn "💭 Optional: enable Winget CommandNotFound suggestions by installing/importing the module '$moduleName'."
-        # If you want to offer install:
-        # Write-Warn "Install: Install-Module $moduleName -Scope CurrentUser"
-    }
-}
-# (Removed stray global Install-Module block that referenced undefined `$moduleName`.)
-
-
-# VSCode-only prompt (ask once)
-try {
-    $key = "WingetCommandNotFoundPrompted"
-    $prompted = (Get-ConfigValue -Key $key -Default "False")
-
-    if ($prompted -ne "True") {
-        $enabled = Enable-WingetCommandNotFound
-        if (-not $enabled) {
-            Write-Host "💭 Optional: install WingetCommandNotFound for better command suggestions." -ForegroundColor Yellow
-            $answer = Read-Host "Install now? (y/n)"
-            if ($answer -match '^(y|yes)$') {
-                Enable-WingetCommandNotFound -Install | Out-Null
-            }
+    if ($available) {
+        try {
+            Import-Module -Name $moduleName -ErrorAction Stop | Out-Null
         }
+        catch {
+            # Import failed
+        }
+    }
 
-        Set-ConfigValue -Key $key -Value "True"
+    $loaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
+
+    if ($loaded) { return $true }
+
+    # If not loaded, optionally install
+    if ($Install) {
+        try {
+            Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Import-Module -Name $moduleName -ErrorAction SilentlyContinue | Out-Null
+            $loaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
+            if ($loaded) { return $true }
+        }
+        catch {
+            Write-Warn ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message)
+        }
     }
-    else {
-        # If already prompted, just try to import quietly (no prompts)
-        Enable-WingetCommandNotFound | Out-Null
+
+    # Prompt once logic (optional)
+    if ($PromptOnce) {
+        $key = "WingetCommandNotFoundPrompted"
+        $prompted = Get-ConfigValue -Key $key -Default "False"
+        if ($prompted -ne "True") {
+            Write-Warn ("💭 Optional: enable Winget CommandNotFound suggestions by installing/importing '{0}'." -f $moduleName)
+            Write-Host ("Install: Install-Module {0} -Scope CurrentUser" -f $moduleName) -ForegroundColor DarkGray
+            Set-ConfigValue -Key $key -Value "True"
+        }
     }
+
+    return $false
 }
+
 catch {
     # Never break VSCode profile on this feature
 }
