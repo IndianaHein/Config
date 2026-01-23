@@ -578,10 +578,5 @@ function Enable-WingetCommandNotFound {
 
     return $false
 }
-
-catch {
-    # Never break VSCode profile on this feature
-}
-
 Import-Module -Name Microsoft.WinGet.CommandNotFound -ErrorAction SilentlyContinue | Out-Null
 if (-not $?) { Write-Warn "💭 Optional: install WingetCommandNotFound (PowerToys) if you want command suggestions." }
