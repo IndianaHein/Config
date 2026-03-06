@@ -1,9 +1,13 @@
-<#  Optimized PowerShell profile (pwsh)
-    - Fast startup (no Read-Host prompts)
-    - Safe installs: opt-in via -Install switch
-    - Resilient config handling (YAML if available, fallback parser if not)
-    - Fixes invalid function names (cd... / cd....)
-#>
+#  Optimized PowerShell profile (pwsh)
+#    - Fast startup (no Read-Host prompts)
+#    - Safe installs: opt-in via -Install switch
+#    - Resilient config handling (YAML if available, fallback parser if not)
+#    - Fixes invalid function names (cd... / cd....)
+#    - PERF: oh-my-posh loads from local cache (not GitHub on every launch)
+#    - PERF: Module presence trusted from config cache (skips Get-Module -ListAvailable)
+#    - PERF: FiraCode font scan skipped when already confirmed installed
+#    - PERF: Start-ThreadJob used instead of Start-Job
+#    - PERF: Config file reads cached in-memory for the session
 
 Write-Host ""
 Write-Host "Welcome Hein ⚡" -ForegroundColor DarkCyan
@@ -13,104 +17,108 @@ Write-Host ""
 # Helpers
 # ----------------------------
 function Write-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
-function Write-Ok { param([string]$Message) Write-Host $Message -ForegroundColor Green }
+function Write-Ok   { param([string]$Message) Write-Host $Message -ForegroundColor Green }
 function Write-Warn { param([string]$Message) Write-Host $Message -ForegroundColor Yellow }
-function Write-Err { param([string]$Message) Write-Host $Message -ForegroundColor Red }
+function Write-Err  { param([string]$Message) Write-Host $Message -ForegroundColor Red }
 
 function Test-GitHubReachable {
     [CmdletBinding()]
-    param(
-        [int]$TimeoutSeconds = 1
-    )
-
+    param([int]$TimeoutSeconds = 1)
     try {
-        # pwsh supports -TimeoutSeconds on Test-Connection
         return [bool](Test-Connection -ComputerName "github.com" -Count 1 -Quiet -TimeoutSeconds $TimeoutSeconds -ErrorAction Stop)
     }
     catch {
-        # Fallback for older hosts: best effort (still should not crash profile)
         try { return [bool](Test-Connection -ComputerName "github.com" -Count 1 -Quiet -ErrorAction Stop) } catch { return $false }
     }
 }
 
 $script:CanConnectToGitHub = Test-GitHubReachable
 
-# Platform flags
-#$IsWindowsPlatform = $IsWindows -or ($env:OS -eq 'Windows_NT')
-# Detect interactive host (avoid server remote hosts)
 $IsInteractive = -not ($Host.Name -in @('ServerRemoteHost', 'ConsoleHost'))
 
-# Prefer keeping config near your profile (portable across OneDrive/paths)
-$script:ProfileDir = Split-Path -Parent $PROFILE
-$script:ConfigPath = Join-Path $script:ProfileDir "pwsh_custom_config.yml"
+$script:ProfileDir  = Split-Path -Parent $PROFILE
+$script:ConfigPath  = Join-Path $script:ProfileDir "pwsh_custom_config.yml"
+$script:OmpConfig   = Join-Path $script:ProfileDir "montys.omp.json"
 
 # ----------------------------
-# Config (YAML w/ fallback)
+# Config (YAML w/ fallback) — in-memory cached
 # ----------------------------
+$script:ConfigCache = $null   # PERF: cache parsed config for the session
+
 function Get-ProfileConfig {
     [CmdletBinding()]
     param()
 
+    # PERF: return cached copy if already loaded
+    if ($null -ne $script:ConfigCache) { return $script:ConfigCache }
+
     if (-not (Test-Path -Path $script:ConfigPath)) {
-        return @{}
+        $script:ConfigCache = @{}
+        return $script:ConfigCache
     }
 
     $raw = Get-Content -Path $script:ConfigPath -Raw -ErrorAction SilentlyContinue
-    if (-not $raw) { return @{} }
+    if (-not $raw) {
+        $script:ConfigCache = @{}
+        return $script:ConfigCache
+    }
 
-    # If Powershell-Yaml is present, use it
     if (Get-Command -Name ConvertFrom-Yaml -ErrorAction SilentlyContinue) {
         try {
             $cfg = $raw | ConvertFrom-Yaml
-            if ($cfg -is [hashtable]) { return $cfg }
-            # Convert PSCustomObject -> Hashtable
+            if ($cfg -is [hashtable]) {
+                $script:ConfigCache = $cfg
+                return $script:ConfigCache
+            }
             $ht = @{}
             $cfg.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
-            return $ht
+            $script:ConfigCache = $ht
+            return $script:ConfigCache
         }
-        catch { return @{} }
+        catch {
+            $script:ConfigCache = @{}
+            return $script:ConfigCache
+        }
     }
 
     # Minimal fallback: parse simple "key: value" lines
     $cfg2 = @{}
     foreach ($line in ($raw -split "(`r`n|`n)")) {
-        if ($line -match '^\s*#') { continue }
-        if ($line -match '^\s*$') { continue }
+        if ($line -match '^\s*#')  { continue }
+        if ($line -match '^\s*$')  { continue }
         if ($line -match '^\s*([^:]+?)\s*:\s*(.*?)\s*$') {
             $key = $matches[1].Trim()
             $val = $matches[2].Trim().Trim('"')
             $cfg2[$key] = $val
         }
     }
-    return $cfg2
+    $script:ConfigCache = $cfg2
+    return $script:ConfigCache
 }
 
 function Save-ProfileConfig {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$Config
-    )
+    param([Parameter(Mandatory)][hashtable]$Config)
 
     if (-not (Test-Path -Path $script:ProfileDir)) {
         New-Item -ItemType Directory -Path $script:ProfileDir -Force | Out-Null
     }
+
+    # PERF: keep cache in sync so subsequent reads don't hit disk
+    $script:ConfigCache = $Config
 
     if (Get-Command -Name ConvertTo-Yaml -ErrorAction SilentlyContinue) {
         $Config | ConvertTo-Yaml | Set-Content -Path $script:ConfigPath -Encoding UTF8
         return
     }
 
-    # Fallback: write simple YAML-ish "key: value"
     $out = foreach ($k in ($Config.Keys | Sort-Object)) {
         $v = $Config[$k]
-        if ($null -eq $v) { "${k}: " }
-        elseif ($v -match '\s') { "${k}: `"$v`"" }
-        else { "${k}: $v" }
+        if ($null -eq $v)        { "${k}: " }
+        elseif ($v -match '\s')  { "${k}: `"$v`"" }
+        else                     { "${k}: $v" }
     }
-
-    # Persist fallback config to file
     $out -join "`n" | Set-Content -Path $script:ConfigPath -Encoding UTF8
-    return
 }
 
 function Get-ConfigValue {
@@ -140,9 +148,7 @@ function Set-ConfigValue {
 # ----------------------------
 function Initialize-DevEnv {
     [CmdletBinding()]
-    param(
-        [switch]$Install
-    )
+    param([switch]$Install)
 
     if (-not $script:CanConnectToGitHub) {
         Write-Warn "❌ Skipping DevEnv initialization: github.com not reachable."
@@ -150,18 +156,27 @@ function Initialize-DevEnv {
     }
 
     $modules = @(
-        @{ Name = "Terminal-Icons"; ConfigKey = "TerminalIconsInstalled" },
-        @{ Name = "powershell-yaml"; ConfigKey = "PowerShellYamlInstalled" },
-        @{ Name = "PoshFunctions"; ConfigKey = "PoshFunctionsInstalled" }
+        @{ Name = "Terminal-Icons";    ConfigKey = "TerminalIconsInstalled" },
+        @{ Name = "powershell-yaml";   ConfigKey = "PowerShellYamlInstalled" },
+        @{ Name = "PoshFunctions";     ConfigKey = "PoshFunctionsInstalled" }
     )
 
     foreach ($m in $modules) {
-        $isInstalled = (Get-ConfigValue -Key $m.ConfigKey -Default "False")
+        $isInstalled = (Get-ConfigValue -Key $m.ConfigKey -Default "False") -eq "True"
+
+        if ($isInstalled) {
+            # PERF: config says it's present — skip slow Get-Module -ListAvailable
+            Import-Module $m.Name -ErrorAction SilentlyContinue
+            Write-Ok "✅ Module loaded: $($m.Name)"
+            continue
+        }
+
+        # Config doesn't confirm it yet — do the (slower) check once
         $cmd = Get-Module -ListAvailable -Name $m.Name
 
         if ($cmd) {
             Import-Module $m.Name -ErrorAction SilentlyContinue
-            if ($isInstalled -ne "True") { Set-ConfigValue -Key $m.ConfigKey -Value "True" }
+            Set-ConfigValue -Key $m.ConfigKey -Value "True"
             Write-Ok "✅ Module loaded: $($m.Name)"
             continue
         }
@@ -183,7 +198,6 @@ function Initialize-DevEnv {
         }
     }
 
-    # App checks (non-blocking)
     if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
         Write-Warn "💭 VS Code not found in PATH. (Install via winget: winget install Microsoft.VisualStudioCode)"
     }
@@ -200,9 +214,7 @@ function Initialize-DevEnv {
 # ----------------------------
 function Get-InstalledFont {
     [CmdletBinding()]
-    param(
-        [string]$NamePattern = "*"
-    )
+    param([string]$NamePattern = "*")
 
     $paths = @(
         "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
@@ -213,18 +225,11 @@ function Get-InstalledFont {
 
     foreach ($p in $paths) {
         if (-not (Test-Path $p)) { continue }
-
         try {
             $item = Get-ItemProperty -Path $p -ErrorAction Stop
-
             foreach ($prop in $item.PSObject.Properties) {
-                # Skip engine props like PSPath/PSParentPath/etc.
                 if ($prop.Name -like "PS*") { continue }
-
-                # Match on registry value NAME
-                if ($prop.Name -like $NamePattern) { [void]$results.Add($prop.Name) }
-
-                # Also match on registry value DATA (often the .ttf filename)
+                if ($prop.Name -like $NamePattern)  { [void]$results.Add($prop.Name) }
                 $data = [string]$prop.Value
                 if ($data -and ($data -like $NamePattern)) { [void]$results.Add($data) }
             }
@@ -235,21 +240,15 @@ function Get-InstalledFont {
     $results | Sort-Object -Unique
 }
 
-
-
-
 function Install-FiraCodeNerdFontZip {
     [CmdletBinding()]
-    param(
-        [string]$ReleaseTag = "v3.2.1"
-    )
+    param([string]$ReleaseTag = "v3.2.1")
 
-    $zipUrl = "https://github.com/ryanoasis/nerd-fonts/releases/download/$ReleaseTag/FiraCode.zip"
-    $tempZip = Join-Path $env:TEMP "FiraCode.NerdFont.zip"
-    $tempDir = Join-Path $env:TEMP ("FiraCodeNerdFont_" + [guid]::NewGuid().ToString("N"))
-
-    $userFontsDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"
-    $hkcuFontsKey = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+    $zipUrl     = "https://github.com/ryanoasis/nerd-fonts/releases/download/$ReleaseTag/FiraCode.zip"
+    $tempZip    = Join-Path $env:TEMP "FiraCode.NerdFont.zip"
+    $tempDir    = Join-Path $env:TEMP ("FiraCodeNerdFont_" + [guid]::NewGuid().ToString("N"))
+    $userFontsDir  = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"
+    $hkcuFontsKey  = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
 
     try {
         Write-Info "Downloading: $zipUrl"
@@ -262,27 +261,18 @@ function Install-FiraCodeNerdFontZip {
         if (-not (Test-Path $hkcuFontsKey)) { New-Item -Path $hkcuFontsKey -Force | Out-Null }
 
         $ttfs = Get-ChildItem -Path $tempDir -Recurse -File -Filter "*.ttf" |
-        Where-Object { $_.Name -match '^FiraCodeNerdFont' }
+                Where-Object { $_.Name -match '^FiraCodeNerdFont' }
 
         if (-not $ttfs) { throw "No FiraCode Nerd Font TTF files found in the downloaded ZIP." }
 
-        $installed = 0
-        $skippedExisting = 0
-        $skippedLocked = 0
+        $installed = $skippedExisting = $skippedLocked = 0
 
         foreach ($f in $ttfs) {
             $dest = Join-Path $userFontsDir $f.Name
-
-            # Don't overwrite in-use fonts; skip if present
-            if (Test-Path $dest) {
-                $skippedExisting++
-                continue
-            }
-
+            if (Test-Path $dest) { $skippedExisting++; continue }
             try {
                 Copy-Item -Path $f.FullName -Destination $dest -Force -ErrorAction Stop
                 $installed++
-
                 $valueName = $f.BaseName + " (TrueType)"
                 New-ItemProperty -Path $hkcuFontsKey -Name $valueName -Value $f.Name -PropertyType String -Force | Out-Null
             }
@@ -294,48 +284,34 @@ function Install-FiraCodeNerdFontZip {
 
         Write-Ok "Fonts installed: $installed"
         Write-Host "Skipped (already present): $skippedExisting" -ForegroundColor DarkGray
-        if ($skippedLocked -gt 0) {
-            Write-Warn "Skipped (locked): $skippedLocked"
-        }
+        if ($skippedLocked -gt 0) { Write-Warn "Skipped (locked): $skippedLocked" }
     }
     finally {
-        Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempZip  -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempDir  -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Install-FiraCodeNerdFont {
     [CmdletBinding()]
     param(
-        [ValidateSet("Winget", "Zip")]
-        [string]$Method = "Winget",
+        [ValidateSet("Winget","Zip")][string]$Method = "Winget",
         [string]$ReleaseTag = "v3.2.1"
     )
 
     if ($Method -eq "Zip") {
         Install-FiraCodeNerdFontZip -ReleaseTag $ReleaseTag
-
-        if (Test-FiraCodeNerdFont) {
-            Write-Ok "✅ FiraCode Nerd Font detected."
-        }
-        else {
-            Write-Warn "Installed but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)."
-        }
+        if (Test-FiraCodeNerdFont) { Write-Ok "✅ FiraCode Nerd Font detected." }
+        else { Write-Warn "Installed but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)." }
         return
     }
 
-    # Winget method
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Warn "winget not found. Re-run with: Install-FiraCodeNerdFont -Method Zip"
         return
     }
 
-    $candidateIds = @(
-        "NerdFonts.FiraCode",
-        "NerdFonts.FiraCode.NerdFont",
-        "NerdFonts.FiraCodeNerdFont"
-    )
-
+    $candidateIds = @("NerdFonts.FiraCode","NerdFonts.FiraCode.NerdFont","NerdFonts.FiraCodeNerdFont")
     $id = $null
     foreach ($cid in $candidateIds) {
         winget show --id $cid --exact *> $null
@@ -345,7 +321,7 @@ function Install-FiraCodeNerdFont {
     if (-not $id) {
         Write-Info "Searching winget for FiraCode Nerd Font..."
         $search = winget search "FiraCode" 2>$null
-        $line = ($search | Select-String -Pattern "NerdFonts\." | Select-Object -First 1).Line
+        $line   = ($search | Select-String -Pattern "NerdFonts\." | Select-Object -First 1).Line
         if ($line) {
             $parts = $line -split '\s{2,}'
             if ($parts.Count -ge 2) { $id = $parts[1] }
@@ -360,26 +336,16 @@ function Install-FiraCodeNerdFont {
     Write-Info "Installing via winget: $id"
     winget install --id $id --exact --accept-source-agreements --accept-package-agreements
 
-    if (Test-FiraCodeNerdFont) {
-        Write-Ok "✅ FiraCode Nerd Font installed/detected."
-    }
-    else {
-        Write-Warn "Installed, but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)."
-    }
+    if (Test-FiraCodeNerdFont) { Write-Ok "✅ FiraCode Nerd Font installed/detected." }
+    else { Write-Warn "Installed, but not detected yet. Restart Windows Terminal/VS Code (or sign out/in)." }
 }
-
 
 function Test-FiraCodeNerdFont {
     [CmdletBinding()]
     param(
-        [string[]]$NamePatterns = @(
-            "*FiraCode*",
-            "*Fira Code*",
-            "*FiraCodeNerdFont*"
-        )
+        [string[]]$NamePatterns = @("*FiraCode*","*Fira Code*","*FiraCodeNerdFont*")
     )
 
-    # A) Check font files (fast and reliable)
     $fontDirs = @(
         (Join-Path $env:WINDIR "Fonts"),
         (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts")
@@ -388,35 +354,23 @@ function Test-FiraCodeNerdFont {
     foreach ($dir in $fontDirs) {
         foreach ($pat in $NamePatterns) {
             $files = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like ($pat.Trim('*') + "*.ttf") -or $_.Name -like $pat }
-            if ($files) {
-                Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
-                return $true
-            }
+                     Where-Object { $_.Name -like ($pat.Trim('*') + "*.ttf") -or $_.Name -like $pat }
+            if ($files) { Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"; return $true }
         }
     }
 
-    # B) Check registry (HKLM + HKCU, name and value)
     foreach ($pat in $NamePatterns) {
         $hits = Get-InstalledFont -NamePattern $pat
-        if ($hits -and $hits.Count -gt 0) {
-            Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
-            return $true
-        }
+        if ($hits -and $hits.Count -gt 0) { Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"; return $true }
     }
 
-    # C) Check installed font families (best signal when registry/file naming differs)
     if ($IsWindows) {
         try {
             Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue | Out-Null
-            $fc = New-Object System.Drawing.Text.InstalledFontCollection
+            $fc       = New-Object System.Drawing.Text.InstalledFontCollection
             $families = $fc.Families | ForEach-Object { $_.Name }
-
             foreach ($name in $families) {
-                if ($name -match 'Fira\s*Code') {
-                    Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"
-                    return $true
-                }
+                if ($name -match 'Fira\s*Code') { Set-ConfigValue -Key "FiraCodeInstalled" -Value "True"; return $true }
             }
         }
         catch { }
@@ -427,6 +381,34 @@ function Test-FiraCodeNerdFont {
     return $false
 }
 
+# ----------------------------
+# oh-my-posh theme management
+# PERF: theme is cached locally — no GitHub fetch on every launch
+# ----------------------------
+function Update-OmpTheme {
+    <#
+    .SYNOPSIS
+        Download the latest oh-my-posh theme from GitHub and cache it locally.
+        Run this manually whenever you update your theme. Not called on profile load.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Uri = 'https://raw.githubusercontent.com/IndianaHein/Config/main/montys.omp.json'
+    )
+
+    if (-not $script:CanConnectToGitHub) {
+        Write-Warn "❌ Cannot reach GitHub. Theme not updated."
+        return
+    }
+
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $script:OmpConfig -UseBasicParsing -ErrorAction Stop
+        Write-Ok "✅ oh-my-posh theme updated: $script:OmpConfig"
+    }
+    catch {
+        Write-Err "❌ Failed to download theme: $($_.Exception.Message)"
+    }
+}
 
 # ----------------------------
 # Updates (keep non-blocking)
@@ -434,71 +416,58 @@ function Test-FiraCodeNerdFont {
 function Update-PowerShellIfNeeded {
     [CmdletBinding()]
     param()
-
     if (-not $script:CanConnectToGitHub) { return }
-
-    try {
-        # Put your existing Update-PowerShell logic here if desired.
-        # IMPORTANT: do not make it noisy / blocking on profile load.
-        return
-    }
-    catch {
-        Write-Warn "PowerShell update check failed: $($_.Exception.Message)"
-    }
+    try { return } catch { Write-Warn "PowerShell update check failed: $($_.Exception.Message)" }
 }
 
 # ----------------------------
-# Quality-of-life functions (valid names)
+# Quality-of-life functions
 # ----------------------------
 function gitpush { git add .; git commit -m "update"; git push }
-function grep { param($regex, $dir) if ($dir) { Get-ChildItem $dir | Select-String $regex } else { $input | Select-String $regex } }
-function df { Get-Volume }
-function sed { param($file, $find, $replace) (Get-Content $file -Raw).Replace("$find", $replace) | Set-Content $file }
-function which { param($name) (Get-Command $name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Definition) }
-function export { param($name, $value) Set-Item -Force -Path "env:$name" -Value $value }
-function pkill { param($name) Get-Process $name -ErrorAction SilentlyContinue | Stop-Process -Force }
-function pgrep { param($name) Get-Process $name -ErrorAction SilentlyContinue }
+function grep    { param($regex, $dir) if ($dir) { Get-ChildItem $dir | Select-String $regex } else { $input | Select-String $regex } }
+function df      { Get-Volume }
+function sed     { param($file, $find, $replace) (Get-Content $file -Raw).Replace("$find", $replace) | Set-Content $file }
+function which   { param($name) (Get-Command $name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Definition) }
+function export  { param($name, $value) Set-Item -Force -Path "env:$name" -Value $value }
+function pkill   { param($name) Get-Process $name -ErrorAction SilentlyContinue | Stop-Process -Force }
+function pgrep   { param($name) Get-Process $name -ErrorAction SilentlyContinue }
 
-# Replace invalid cd... / cd.... with valid helpers
 function cdup { param([int]$Levels = 1) for ($i = 0; $i -lt $Levels; $i++) { Set-Location .. } }
-function cd2 { cdup 2 }
-function cd3 { cdup 3 }
+function cd2  { cdup 2 }
+function cd3  { cdup 3 }
 
-function md5 { Get-FileHash -Algorithm MD5    @args }
-function sha1 { Get-FileHash -Algorithm SHA1   @args }
+function md5    { Get-FileHash -Algorithm MD5    @args }
+function sha1   { Get-FileHash -Algorithm SHA1   @args }
 function sha256 { Get-FileHash -Algorithm SHA256 @args }
-function n { notepad @args }
-function vs { code @args }
-function expl { explorer.exe @args }
+function n      { notepad @args }
+function vs     { code @args }
+function expl   { explorer.exe @args }
 
 function admin {
     if ($args.Count -gt 0) {
         $argList = "& '" + ($args -join " ") + "'"
         Start-Process "wt.exe" -Verb RunAs -ArgumentList $argList
     }
-    else {
-        Start-Process "wt.exe" -Verb RunAs
-    }
+    else { Start-Process "wt.exe" -Verb RunAs }
 }
-Set-Alias -Name su -Value admin
+Set-Alias -Name su   -Value admin
 Set-Alias -Name sudo -Value admin
 
 function sync-profile {
-    clear-host
+    Clear-Host
     @(
         $Profile.AllUsersAllHosts,
         $Profile.AllUsersCurrentHost,
         $Profile.CurrentUserAllHosts,
         $Profile.CurrentUserCurrentHost
-    ) | ForEach-Object {
-        if (Test-Path $_) { . $_ }
-    }
+    ) | ForEach-Object { if (Test-Path $_) { . $_ } }
 }
 Set-Alias -Name reload -Value sync-profile
 
 # ----------------------------
 # Profile entrypoint (fast + safe)
 # ----------------------------
+
 # Ensure config exists (non-noisy)
 if (-not (Test-Path -Path $script:ConfigPath)) {
     Save-ProfileConfig -Config @{}
@@ -508,51 +477,47 @@ if (-not (Test-Path -Path $script:ConfigPath)) {
 # Load essentials (no install unless you opt-in later)
 Initialize-DevEnv
 
-# Non-blocking checks (no prompts)
-Test-FiraCodeNerdFont | Out-Null
+# PERF: only run the full font scan if we don't already know the answer
+if ((Get-ConfigValue -Key "FiraCodeInstalled" -Default "False") -ne "True") {
+    Test-FiraCodeNerdFont | Out-Null
+}
 
-# Optional: keep your oh-my-posh init (don’t hard-fail)
+# oh-my-posh: PERF: load from local cached theme file (run Update-OmpTheme to refresh)
 if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
-    try {
-        oh-my-posh init pwsh --config 'https://raw.githubusercontent.com/IndianaHein/Config/main/montys.omp.json' | Invoke-Expression
+    if (-not (Test-Path $script:OmpConfig)) {
+        Write-Warn "💭 oh-my-posh theme not cached locally. Run: Update-OmpTheme"
     }
-    catch {
-        Write-Warn "oh-my-posh init failed: $($_.Exception.Message)"
+    else {
+        try {
+            oh-my-posh init pwsh --config $script:OmpConfig | Invoke-Expression
+        }
+        catch {
+            Write-Warn "oh-my-posh init failed: $($_.Exception.Message)"
+        }
     }
 }
 
-# If you still want background update checks, do it quietly:
-Start-Job -ScriptBlock { Update-PowerShellIfNeeded } | Out-Null
+# PERF: Start-ThreadJob is much lighter than Start-Job
+Start-ThreadJob -ScriptBlock { Update-PowerShellIfNeeded } | Out-Null
 
 # Winget CommandNotFound (quiet)
 function Enable-WingetCommandNotFound {
     [CmdletBinding()]
-    param(
-        [switch]$PromptOnce,
-        [switch]$Install
-    )
+    param([switch]$PromptOnce, [switch]$Install)
 
     $moduleName = "Microsoft.WinGet.CommandNotFound"
 
-    # Try import if available
     $available = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue |
-    Sort-Object Version -Descending |
-    Select-Object -First 1
+                 Sort-Object Version -Descending |
+                 Select-Object -First 1
 
     if ($available) {
-        try {
-            Import-Module -Name $moduleName -ErrorAction Stop | Out-Null
-        }
-        catch {
-            # Import failed
-        }
+        try { Import-Module -Name $moduleName -ErrorAction Stop | Out-Null } catch { }
     }
 
     $loaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
-
     if ($loaded) { return $true }
 
-    # If not loaded, optionally install
     if ($Install) {
         try {
             Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
@@ -560,14 +525,11 @@ function Enable-WingetCommandNotFound {
             $loaded = [bool](Get-Module -Name $moduleName -ErrorAction SilentlyContinue)
             if ($loaded) { return $true }
         }
-        catch {
-            Write-Warn ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message)
-        }
+        catch { Write-Warn ("❌ Failed to install {0}: {1}" -f $moduleName, $_.Exception.Message) }
     }
 
-    # Prompt once logic (optional)
     if ($PromptOnce) {
-        $key = "WingetCommandNotFoundPrompted"
+        $key      = "WingetCommandNotFoundPrompted"
         $prompted = Get-ConfigValue -Key $key -Default "False"
         if ($prompted -ne "True") {
             Write-Warn ("💭 Optional: enable Winget CommandNotFound suggestions by installing/importing '{0}'." -f $moduleName)
